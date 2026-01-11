@@ -1,5 +1,6 @@
 # =========================================================
-#  HIMAWARI-9 EXTREME WEATHER ANALYSIS (FIXED VERSION)
+# HIMAWARI-9 EXTREME WEATHER ANALYSIS
+# SAFE VERSION FOR STREAMLIT CLOUD
 # =========================================================
 
 import streamlit as st
@@ -7,55 +8,77 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from math import radians, cos, sin, asin, sqrt
 
-# =========================================================
-# CONFIG
-# =========================================================
 st.set_page_config(
     page_title="Analisis Cuaca Ekstrem Himawari-9",
     layout="wide"
 )
 
 # =========================================================
-# FUNCTIONS
+# SAFE FUNCTIONS
 # =========================================================
-def haversine(lon1, lat1, lon2, lat2):
-    lon1, lat1, lon2, lat2 = map(
-        radians, [lon1, lat1, lon2, lat2]
-    )
-    dlon = lon2 - lon1
-    dlat = lat2 - lat1
-    a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
-    return 6371 * 2 * asin(sqrt(a))
-
-def read_nc_safe(file):
+def open_nc(file):
     try:
-        ds = xr.open_dataset(file, engine="scipy")
-        return ds
+        return xr.open_dataset(file, engine="scipy")
     except Exception as e:
-        st.warning(f"Gagal membaca file {file.name}: {e}")
+        st.error(f"Gagal membuka {file.name}: {e}")
         return None
 
-def extract_radius_mean(ds, lat0, lon0, radius_km):
-    # Koordinat 2D Himawari
-    lat2d = ds["latitude"].values
-    lon2d = ds["longitude"].values
 
-    # Ambil variable utama (Radiance / TBB)
+def find_nearest_pixel(ds, lat0, lon0):
+    """
+    Cari pixel terdekat dari lokasi kejadian
+    Aman untuk berbagai struktur Himawari
+    """
+    # Cari coordinate latitude & longitude
+    for lat_name in ["latitude", "lat"]:
+        if lat_name in ds:
+            lat = ds[lat_name]
+            break
+    else:
+        raise ValueError("Latitude tidak ditemukan di file")
+
+    for lon_name in ["longitude", "lon"]:
+        if lon_name in ds:
+            lon = ds[lon_name]
+            break
+    else:
+        raise ValueError("Longitude tidak ditemukan di file")
+
+    # Pastikan 2D
+    if lat.ndim == 1 and lon.ndim == 1:
+        lon2d, lat2d = np.meshgrid(lon, lat)
+    else:
+        lat2d = lat.values
+        lon2d = lon.values
+
+    dist2 = (lat2d - lat0)**2 + (lon2d - lon0)**2
+    iy, ix = np.unravel_index(np.argmin(dist2), dist2.shape)
+
+    return iy, ix
+
+
+def extract_mean_window(ds, lat0, lon0, radius_km):
+    """
+    Ambil rata-rata pixel sekitar lokasi
+    """
     var_name = list(ds.data_vars.keys())[0]
     data = ds[var_name].values
 
-    # Hitung jarak
-    dist = np.vectorize(haversine)(
-        lon0, lat0, lon2d, lat2d
-    )
+    iy, ix = find_nearest_pixel(ds, lat0, lon0)
 
-    mask = dist <= radius_km
-    if np.sum(mask) == 0:
-        return np.nan
+    # Estimasi resolusi Himawari ~2 km
+    pixel_radius = int(radius_km / 2)
 
-    return np.nanmean(data[mask])
+    y1 = max(0, iy - pixel_radius)
+    y2 = min(data.shape[0], iy + pixel_radius)
+    x1 = max(0, ix - pixel_radius)
+    x2 = min(data.shape[1], ix + pixel_radius)
+
+    window = data[y1:y2, x1:x2]
+
+    return float(np.nanmean(window))
+
 
 # =========================================================
 # UI
@@ -65,63 +88,58 @@ st.markdown("**Studi Kasus: Puting Beliung Terminal 1 Bandara Juanda**")
 
 with st.sidebar:
     st.header("📍 Lokasi Kejadian")
-    lat0 = st.number_input(
-        "Latitude", value=-7.373539, format="%.6f"
-    )
-    lon0 = st.number_input(
-        "Longitude", value=112.793786, format="%.6f"
-    )
+    lat0 = st.number_input("Latitude", value=-7.373539, format="%.6f")
+    lon0 = st.number_input("Longitude", value=112.793786, format="%.6f")
 
-    radius = st.selectbox(
-        "Radius Analisis (km)", [5, 10]
-    )
+    radius = st.selectbox("Radius Analisis (km)", [5, 10])
 
-    st.header("📂 Upload File NC Himawari")
-    uploaded_files = st.file_uploader(
-        "Upload B08, B09, B13 (1 jam, interval 10 menit)",
-        type=["nc"],
+    st.header("📂 Upload File NC")
+    files = st.file_uploader(
+        "File Himawari B08/B09/B13 (1 jam)",
+        type="nc",
         accept_multiple_files=True
     )
 
 # =========================================================
 # PROCESS
 # =========================================================
-if st.button("🔍 Analisis Data"):
+if st.button("🔍 Analisis"):
 
-    if not uploaded_files:
-        st.error("❌ File NC belum diupload")
+    if not files:
+        st.warning("File NC belum diupload")
         st.stop()
 
-    results = []
+    output = []
 
-    for file in uploaded_files:
-        ds = read_nc_safe(file)
+    for f in files:
+        ds = open_nc(f)
         if ds is None:
             continue
 
-        mean_val = extract_radius_mean(
-            ds, lat0, lon0, radius
-        )
+        try:
+            mean_val = extract_mean_window(
+                ds, lat0, lon0, radius
+            )
+        except Exception as e:
+            st.error(f"Gagal proses {f.name}: {e}")
+            continue
 
-        band = file.name.split("_")[1]
+        band = f.name.split("_")[1]
 
-        results.append({
-            "File": file.name,
+        output.append({
+            "File": f.name,
             "Band": band,
             "Radius_km": radius,
             "Mean_Value": mean_val
         })
 
-    if not results:
-        st.error("❌ Tidak ada data yang berhasil diproses")
+    if not output:
+        st.error("Tidak ada data berhasil diproses")
         st.stop()
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(output)
 
-    # =====================================================
-    # OUTPUT
-    # =====================================================
-    st.subheader("📊 Tabel Hasil Analisis")
+    st.subheader("📊 Tabel Hasil")
     st.dataframe(df, use_container_width=True)
 
     st.subheader("📈 Grafik Time Series")
@@ -132,4 +150,4 @@ if st.button("🔍 Analisis Data"):
     ax.set_title(f"Radius {radius} km")
     st.pyplot(fig)
 
-    st.success("✅ Analisis Himawari berhasil")
+    st.success("✅ Analisis selesai tanpa crash")
