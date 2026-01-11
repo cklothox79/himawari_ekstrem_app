@@ -1,6 +1,5 @@
 # =========================================================
-#  HIMAWARI-9 EXTREME WEATHER ANALYSIS (STAGE 1)
-#  Stable for Streamlit Cloud (NO netCDF4)
+#  HIMAWARI-9 EXTREME WEATHER ANALYSIS (FIXED VERSION)
 # =========================================================
 
 import streamlit as st
@@ -22,16 +21,15 @@ st.set_page_config(
 # FUNCTIONS
 # =========================================================
 def haversine(lon1, lat1, lon2, lat2):
-    """Calculate distance (km)"""
-    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    lon1, lat1, lon2, lat2 = map(
+        radians, [lon1, lat1, lon2, lat2]
+    )
     dlon = lon2 - lon1
     dlat = lat2 - lat1
     a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
-    c = 2 * asin(sqrt(a))
-    return 6371 * c
+    return 6371 * 2 * asin(sqrt(a))
 
 def read_nc_safe(file):
-    """Read NC safely using h5netcdf"""
     try:
         ds = xr.open_dataset(file, engine="scipy")
         return ds
@@ -39,16 +37,21 @@ def read_nc_safe(file):
         st.warning(f"Gagal membaca file {file.name}: {e}")
         return None
 
-def extract_radius_mean(ds, var, lat0, lon0, radius_km):
-    lat = ds['lat'].values
-    lon = ds['lon'].values
-    data = ds[var].values
+def extract_radius_mean(ds, lat0, lon0, radius_km):
+    # Koordinat 2D Himawari
+    lat2d = ds["latitude"].values
+    lon2d = ds["longitude"].values
 
-    lat2d, lon2d = np.meshgrid(lat, lon, indexing='ij')
+    # Ambil variable utama (Radiance / TBB)
+    var_name = list(ds.data_vars.keys())[0]
+    data = ds[var_name].values
 
-    dist = np.vectorize(haversine)(lon0, lat0, lon2d, lat2d)
+    # Hitung jarak
+    dist = np.vectorize(haversine)(
+        lon0, lat0, lon2d, lat2d
+    )
+
     mask = dist <= radius_km
-
     if np.sum(mask) == 0:
         return np.nan
 
@@ -57,18 +60,25 @@ def extract_radius_mean(ds, var, lat0, lon0, radius_km):
 # =========================================================
 # UI
 # =========================================================
-st.title("🌪️ Analisis Cuaca Ekstrem Berbasis Himawari-9")
+st.title("🌪️ Analisis Cuaca Ekstrem Himawari-9")
 st.markdown("**Studi Kasus: Puting Beliung Terminal 1 Bandara Juanda**")
 
 with st.sidebar:
-    st.header("Input Lokasi")
-    lat0 = st.number_input("Latitude", value=-7.373539, format="%.6f")
-    lon0 = st.number_input("Longitude", value=112.793786, format="%.6f")
-    radius = st.selectbox("Radius Analisis (km)", [5, 10])
+    st.header("📍 Lokasi Kejadian")
+    lat0 = st.number_input(
+        "Latitude", value=-7.373539, format="%.6f"
+    )
+    lon0 = st.number_input(
+        "Longitude", value=112.793786, format="%.6f"
+    )
 
-    st.header("Upload File NC")
+    radius = st.selectbox(
+        "Radius Analisis (km)", [5, 10]
+    )
+
+    st.header("📂 Upload File NC Himawari")
     uploaded_files = st.file_uploader(
-        "Upload NC (B08, B09, B13 | 1 Jam | 10 Menit)",
+        "Upload B08, B09, B13 (1 jam, interval 10 menit)",
         type=["nc"],
         accept_multiple_files=True
     )
@@ -89,15 +99,15 @@ if st.button("🔍 Analisis Data"):
         if ds is None:
             continue
 
-        var = list(ds.data_vars.keys())[0]
-
         mean_val = extract_radius_mean(
-            ds, var, lat0, lon0, radius
+            ds, lat0, lon0, radius
         )
+
+        band = file.name.split("_")[1]
 
         results.append({
             "File": file.name,
-            "Band": var,
+            "Band": band,
             "Radius_km": radius,
             "Mean_Value": mean_val
         })
@@ -114,12 +124,12 @@ if st.button("🔍 Analisis Data"):
     st.subheader("📊 Tabel Hasil Analisis")
     st.dataframe(df, use_container_width=True)
 
-    st.subheader("📈 Grafik Nilai Rata-rata")
+    st.subheader("📈 Grafik Time Series")
     fig, ax = plt.subplots()
     ax.plot(df["File"], df["Mean_Value"], marker="o")
     ax.set_xticklabels(df["File"], rotation=90)
-    ax.set_ylabel("Nilai")
+    ax.set_ylabel("Nilai Rata-rata")
     ax.set_title(f"Radius {radius} km")
     st.pyplot(fig)
 
-    st.success("✅ Analisis selesai")
+    st.success("✅ Analisis Himawari berhasil")
