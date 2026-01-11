@@ -1,52 +1,54 @@
+# =====================================================
+#  HIMAWARI TBB EXTREME WEATHER ANALYSIS – FINAL STAGE 1
+#  Stabil | Anti Oh No Error | BMKG Ready
+# =====================================================
+
 import streamlit as st
-import xarray as xr
 import numpy as np
-import pandas as pd
+import xarray as xr
 
 st.set_page_config(
-    page_title="Analisis Puting Beliung Himawari-9",
-    layout="wide"
+    page_title="Analisis TBB Himawari",
+    layout="centered"
 )
 
-st.title("🌪️ Analisis Suhu Puncak Awan (Himawari-9)")
-st.markdown("**Studi Kasus: Puting Beliung Terminal 1 Bandara Juanda**")
+st.title("🛰️ Analisis Suhu Puncak Awan (TBB) Himawari")
+st.caption("Tahap 1 – Ekstraksi Mean TBB berbasis koordinat")
 
 # =====================================================
-# INPUT
+#  FUNGSI AMAN & STABIL
 # =====================================================
-with st.sidebar:
-    st.header("📍 Lokasi Kejadian")
-    lat0 = st.number_input("Latitude", value=-7.373539, format="%.6f")
-    lon0 = st.number_input("Longitude", value=112.793786, format="%.6f")
-
-    radius_km = st.selectbox("Radius Analisis (km)", [5, 10])
-
-    st.header("📂 Upload File NC (B13)")
-    files = st.file_uploader(
-        "Upload file NC Himawari (1 jam, tiap 10 menit)",
-        type="nc",
-        accept_multiple_files=True
-    )
-
-# =====================================================
-# FUNCTIONS (AMAN)
-# =====================================================
-def open_nc(file):
-    return xr.open_dataset(file, engine="scipy")
 
 def find_nearest_pixel(lat2d, lon2d, lat0, lon0):
-    dist2 = (lat2d - lat0)**2 + (lon2d - lon0)**2
-    return np.unravel_index(np.argmin(dist2), dist2.shape)
+    """
+    Cari pixel terdekat dari koordinat target
+    Aman untuk MaskedArray / Streamlit Cloud
+    """
+    lat = np.asarray(lat2d, dtype=float)
+    lon = np.asarray(lon2d, dtype=float)
+
+    lat_f = lat.ravel()
+    lon_f = lon.ravel()
+
+    dist = np.abs(lat_f - lat0) + np.abs(lon_f - lon0)
+    idx = np.nanargmin(dist)
+
+    iy, ix = np.unravel_index(idx, lat.shape)
+    return iy, ix
+
 
 def extract_mean_tbb(ds, lat0, lon0, radius_km):
+    """
+    Hitung rata-rata TBB di sekitar titik target
+    """
     lat2d = ds["latitude"].values
     lon2d = ds["longitude"].values
     tbb = ds["tbb"].values
 
     iy, ix = find_nearest_pixel(lat2d, lon2d, lat0, lon0)
 
-    # Resolusi Himawari ~2 km
-    pixel_radius = int(radius_km / 2)
+    # Aproksimasi resolusi Himawari ~2 km
+    pixel_radius = max(1, int(radius_km / 2))
 
     y1 = max(0, iy - pixel_radius)
     y2 = min(tbb.shape[0], iy + pixel_radius + 1)
@@ -54,38 +56,89 @@ def extract_mean_tbb(ds, lat0, lon0, radius_km):
     x2 = min(tbb.shape[1], ix + pixel_radius + 1)
 
     window = tbb[y1:y2, x1:x2]
+
     return float(np.nanmean(window))
 
+
 # =====================================================
-# PROCESS
+#  INPUT PENGGUNA
 # =====================================================
-if st.button("🔍 Proses Analisis"):
 
-    if not files:
-        st.warning("Silakan upload file NC terlebih dahulu")
-        st.stop()
+st.subheader("📍 Lokasi Kejadian")
 
-    hasil = []
+lat0 = st.number_input(
+    "Lintang (°)",
+    value=-7.5,
+    step=0.01,
+    format="%.4f"
+)
 
-    for f in files:
-        ds = open_nc(f)
+lon0 = st.number_input(
+    "Bujur (°)",
+    value=112.5,
+    step=0.01,
+    format="%.4f"
+)
 
-        mean_tbb = extract_mean_tbb(
-            ds, lat0, lon0, radius_km
-        )
+radius_km = st.slider(
+    "Radius Analisis (km)",
+    min_value=2,
+    max_value=20,
+    value=10
+)
 
-        waktu = f.name.split("_")[-1].replace(".nc", "")
+st.subheader("🧪 Tes Buka File NC Himawari")
 
-        hasil.append({
-            "Waktu (UTC)": waktu,
-            "Radius (km)": radius_km,
-            "Mean TBB (K)": round(mean_tbb, 2),
-            "Mean TBB (°C)": round(mean_tbb - 273.15, 2)
-        })
+uploaded_file = st.file_uploader(
+    "Upload 1 file NC Himawari saja",
+    type=["nc"]
+)
 
-    df = pd.DataFrame(hasil).sort_values("Waktu (UTC)")
+# =====================================================
+#  PROSES FILE
+# =====================================================
 
-    st.subheader("📊 Hasil Suhu Puncak Awan")
-    st.dataframe(df, use_container_width=True)
+if uploaded_file:
+    st.success(f"📂 Nama file: {uploaded_file.name}")
 
-    st.success("✅ Analisis berhasil tanpa crash")
+    try:
+        ds = xr.open_dataset(uploaded_file)
+
+        st.success("✅ File NC BERHASIL dibuka")
+
+        st.markdown("📌 **Variabel:**")
+        st.code(list(ds.data_vars))
+
+        st.markdown("📌 **Koordinat:**")
+        st.code(list(ds.coords))
+
+        if "tbb" not in ds:
+            st.error("❌ Variabel 'tbb' tidak ditemukan")
+            st.stop()
+
+        if "latitude" not in ds.coords or "longitude" not in ds.coords:
+            st.error("❌ Koordinat latitude / longitude tidak ditemukan")
+            st.stop()
+
+        if st.button("▶️ Proses Analisis TBB"):
+            mean_tbb = extract_mean_tbb(
+                ds, lat0, lon0, radius_km
+            )
+
+            st.subheader("📊 Hasil Analisis")
+            st.metric(
+                label="Mean TBB (°C)",
+                value=f"{mean_tbb:.2f}"
+            )
+
+            # Interpretasi cepat
+            if mean_tbb <= -60:
+                st.error("⚠️ Awan Cumulonimbus sangat tinggi (potensi ekstrem)")
+            elif mean_tbb <= -50:
+                st.warning("⛈️ Awan konvektif tinggi")
+            else:
+                st.info("🌤️ Tidak terindikasi awan konvektif kuat")
+
+    except Exception as e:
+        st.error("❌ Terjadi kesalahan saat membaca file")
+        st.code(str(e))
