@@ -1,7 +1,6 @@
 # =========================================================
-#  APP.PY – TAHAP 1 (STABIL STREAMLIT CLOUD)
-#  ANALISIS CUACA EKSTREM HIMAWARI (NC FILE)
-#  Radius 5 km & 10 km
+#  HIMAWARI-9 EXTREME WEATHER ANALYSIS (STAGE 1)
+#  Stable for Streamlit Cloud (NO netCDF4)
 # =========================================================
 
 import streamlit as st
@@ -9,194 +8,118 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
-import tempfile
-import os
 
 # =========================================================
-#  KONFIGURASI HALAMAN
+# CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="Analisis Cuaca Ekstrem Himawari",
+    page_title="Analisis Cuaca Ekstrem Himawari-9",
     layout="wide"
 )
 
-st.title("🌩️ Analisis Cuaca Ekstrem Berbasis Satelit Himawari")
-st.caption("Studi Kasus: Puting Beliung Bandara Juanda – 8 Januari 2026")
-
 # =========================================================
-#  FUNGSI UTILITAS
+# FUNCTIONS
 # =========================================================
 def haversine(lon1, lat1, lon2, lat2):
-    """
-    Hitung jarak dua titik (km) – support array
-    """
+    """Calculate distance (km)"""
     lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
     dlon = lon2 - lon1
     dlat = lat2 - lat1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    a = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
     c = 2 * asin(sqrt(a))
-    r = 6371.0
-    return c * r
+    return 6371 * c
 
+def read_nc_safe(file):
+    """Read NC safely using h5netcdf"""
+    try:
+        ds = xr.open_dataset(file, engine="h5netcdf")
+        return ds
+    except Exception as e:
+        st.warning(f"Gagal membaca file {file.name}: {e}")
+        return None
 
-def extract_radius_stats(ds, lon0, lat0, radius_km):
-    """
-    Ekstraksi statistik suhu puncak awan dalam radius tertentu
-    """
-    lats = ds["latitude"].values
-    lons = ds["longitude"].values
-    tbb = ds["tbb"].values - 273.15  # Kelvin → Celsius
+def extract_radius_mean(ds, var, lat0, lon0, radius_km):
+    lat = ds['lat'].values
+    lon = ds['lon'].values
+    data = ds[var].values
 
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    dist = haversine(lon0, lat0, lon2d, lat2d)
+    lat2d, lon2d = np.meshgrid(lat, lon, indexing='ij')
 
+    dist = np.vectorize(haversine)(lon0, lat0, lon2d, lat2d)
     mask = dist <= radius_km
-    data = tbb[mask]
 
-    return {
-        "min": float(np.nanmin(data)),
-        "mean": float(np.nanmean(data))
-    }
+    if np.sum(mask) == 0:
+        return np.nan
 
+    return np.nanmean(data[mask])
 
 # =========================================================
-#  SIDEBAR INPUT
+# UI
 # =========================================================
-st.sidebar.header("🔧 Input Analisis")
+st.title("🌪️ Analisis Cuaca Ekstrem Berbasis Himawari-9")
+st.markdown("**Studi Kasus: Puting Beliung Terminal 1 Bandara Juanda**")
 
-lat0 = st.sidebar.number_input(
-    "Latitude Lokasi Kejadian",
-    value=-7.373539,
-    format="%.6f"
-)
+with st.sidebar:
+    st.header("Input Lokasi")
+    lat0 = st.number_input("Latitude", value=-7.373539, format="%.6f")
+    lon0 = st.number_input("Longitude", value=112.793786, format="%.6f")
+    radius = st.selectbox("Radius Analisis (km)", [5, 10])
 
-lon0 = st.sidebar.number_input(
-    "Longitude Lokasi Kejadian",
-    value=112.793786,
-    format="%.6f"
-)
-
-uploaded_files = st.sidebar.file_uploader(
-    "Upload File NC (1 jam, resolusi 10 menit)",
-    type=["nc"],
-    accept_multiple_files=True
-)
-
-process = st.sidebar.button("🚀 Proses Analisis")
+    st.header("Upload File NC")
+    uploaded_files = st.file_uploader(
+        "Upload NC (B08, B09, B13 | 1 Jam | 10 Menit)",
+        type=["nc"],
+        accept_multiple_files=True
+    )
 
 # =========================================================
-#  PROSES UTAMA
+# PROCESS
 # =========================================================
-if process:
+if st.button("🔍 Analisis Data"):
 
     if not uploaded_files:
-        st.warning("Silakan upload file NC terlebih dahulu.")
+        st.error("❌ File NC belum diupload")
         st.stop()
-
-    st.success("File berhasil diunggah. Memproses data...")
 
     results = []
 
     for file in uploaded_files:
+        ds = read_nc_safe(file)
+        if ds is None:
+            continue
 
-        # ---- simpan file sementara (WAJIB untuk Streamlit Cloud) ----
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".nc") as tmp:
-            tmp.write(file.read())
-            tmp_path = tmp.name
+        var = list(ds.data_vars.keys())[0]
 
-        try:
-            ds = xr.open_dataset(tmp_path, engine="netcdf4")
+        mean_val = extract_radius_mean(
+            ds, var, lat0, lon0, radius
+        )
 
-            # ---- ambil waktu dari metadata ----
-            time_str = ds.attrs.get("start_time", None)
-            if time_str:
-                waktu = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-            else:
-                # fallback dari nama file
-                waktu = file.name
+        results.append({
+            "File": file.name,
+            "Band": var,
+            "Radius_km": radius,
+            "Mean_Value": mean_val
+        })
 
-            stats_5 = extract_radius_stats(ds, lon0, lat0, 5)
-            stats_10 = extract_radius_stats(ds, lon0, lat0, 10)
-
-            results.append({
-                "Waktu": waktu,
-                "CTT Min 5 km (°C)": stats_5["min"],
-                "CTT Mean 5 km (°C)": stats_5["mean"],
-                "CTT Min 10 km (°C)": stats_10["min"],
-                "CTT Mean 10 km (°C)": stats_10["mean"]
-            })
-
-            ds.close()
-
-        except Exception as e:
-            st.error(f"Gagal membaca file {file.name}: {e}")
-
-        finally:
-            os.remove(tmp_path)
-
-    # =====================================================
-    #  DATAFRAME
-    # =====================================================
-    df = pd.DataFrame(results)
-
-    if df.empty:
-        st.error("Tidak ada data yang berhasil diproses.")
+    if not results:
+        st.error("❌ Tidak ada data yang berhasil diproses")
         st.stop()
 
-    df = df.sort_values("Waktu")
+    df = pd.DataFrame(results)
 
     # =====================================================
-    #  TABEL HASIL
+    # OUTPUT
     # =====================================================
-    st.subheader("📊 Tabel Ringkasan Suhu Puncak Awan (CTT)")
+    st.subheader("📊 Tabel Hasil Analisis")
     st.dataframe(df, use_container_width=True)
 
-    # =====================================================
-    #  GRAFIK TIME SERIES
-    # =====================================================
-    st.subheader("📈 Time Series Suhu Puncak Awan")
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(df["Waktu"], df["CTT Min 5 km (°C)"], marker="o", label="Min 5 km")
-    ax.plot(df["Waktu"], df["CTT Min 10 km (°C)"], marker="s", label="Min 10 km")
-
-    ax.set_ylabel("CTT (°C)")
-    ax.set_xlabel("Waktu (UTC)")
-    ax.set_title("Perkembangan Suhu Puncak Awan")
-    ax.legend()
-    ax.grid(True)
-
+    st.subheader("📈 Grafik Nilai Rata-rata")
+    fig, ax = plt.subplots()
+    ax.plot(df["File"], df["Mean_Value"], marker="o")
+    ax.set_xticklabels(df["File"], rotation=90)
+    ax.set_ylabel("Nilai")
+    ax.set_title(f"Radius {radius} km")
     st.pyplot(fig)
 
-    # =====================================================
-    #  INTERPRETASI OTOMATIS (VERSI AWAL)
-    # =====================================================
-    st.subheader("🧠 Interpretasi Awal Otomatis")
-
-    min_10 = df["CTT Min 10 km (°C)"].min()
-    trend = df["CTT Min 10 km (°C)"].iloc[-1] - df["CTT Min 10 km (°C)"].iloc[0]
-
-    if min_10 <= -60:
-        fase = "awan Cumulonimbus sangat kuat"
-    elif min_10 <= -50:
-        fase = "awan konvektif kuat"
-    else:
-        fase = "awan konvektif sedang"
-
-    narasi = f"""
-    Teramati suhu puncak awan minimum hingga {min_10:.1f}°C
-    pada radius 10 km dari lokasi kejadian.
-    Perubahan suhu puncak awan menunjukkan
-    {'penurunan signifikan' if trend < 0 else 'fluktuasi terbatas'},
-    yang mengindikasikan proses konveksi aktif.
-    Kondisi ini konsisten dengan keberadaan {fase}
-    yang berpotensi menimbulkan cuaca ekstrem
-    seperti angin kencang atau puting beliung.
-    """
-
-    st.write(narasi)
-
-else:
-    st.info("⬅️ Upload file NC lalu klik **Proses Analisis**")
+    st.success("✅ Analisis selesai")
