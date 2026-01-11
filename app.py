@@ -33,7 +33,7 @@ def haversine(lon1, lat1, lon2, lat2):
 def read_nc_safe(file):
     """Read NC safely using h5netcdf"""
     try:
-        ds = xr.open_dataset(file, engine="h5netcdf")
+        ds = xr.open_dataset(file, engine="scipy")
         return ds
     except Exception as e:
         st.warning(f"Gagal membaca file {file.name}: {e}")
