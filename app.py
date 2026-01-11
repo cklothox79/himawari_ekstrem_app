@@ -1,6 +1,6 @@
 # =====================================================
-#  HIMAWARI TBB EXTREME WEATHER ANALYSIS – FINAL STAGE 1
-#  Stabil | Anti Oh No Error | BMKG Ready
+#  HIMAWARI TBB EXTREME WEATHER ANALYSIS – FINAL FIX
+#  SUPPORT LAT/LON 1D (BMKG STANDARD)
 # =====================================================
 
 import streamlit as st
@@ -13,41 +13,29 @@ st.set_page_config(
 )
 
 st.title("🛰️ Analisis Suhu Puncak Awan (TBB) Himawari")
-st.caption("Tahap 1 – Ekstraksi Mean TBB berbasis koordinat")
+st.caption("Ekstraksi Mean TBB berbasis koordinat (FIXED)")
 
 # =====================================================
-#  FUNGSI AMAN & STABIL
+#  FUNGSI UTAMA (AMAN 1D GRID)
 # =====================================================
 
-def find_nearest_pixel(lat2d, lon2d, lat0, lon0):
-    """
-    Cari pixel terdekat dari koordinat target
-    Aman untuk MaskedArray / Streamlit Cloud
-    """
-    lat = np.asarray(lat2d, dtype=float)
-    lon = np.asarray(lon2d, dtype=float)
-
-    lat_f = lat.ravel()
-    lon_f = lon.ravel()
-
-    dist = np.abs(lat_f - lat0) + np.abs(lon_f - lon0)
-    idx = np.nanargmin(dist)
-
-    iy, ix = np.unravel_index(idx, lat.shape)
-    return iy, ix
+def find_nearest_index(arr, value):
+    arr = np.asarray(arr, dtype=float)
+    return int(np.nanargmin(np.abs(arr - value)))
 
 
 def extract_mean_tbb(ds, lat0, lon0, radius_km):
     """
-    Hitung rata-rata TBB di sekitar titik target
+    Hitung mean TBB berbasis lat/lon 1D Himawari
     """
-    lat2d = ds["latitude"].values
-    lon2d = ds["longitude"].values
+    lat = ds["latitude"].values
+    lon = ds["longitude"].values
     tbb = ds["tbb"].values
 
-    iy, ix = find_nearest_pixel(lat2d, lon2d, lat0, lon0)
+    iy = find_nearest_index(lat, lat0)
+    ix = find_nearest_index(lon, lon0)
 
-    # Aproksimasi resolusi Himawari ~2 km
+    # Resolusi Himawari ~2 km
     pixel_radius = max(1, int(radius_km / 2))
 
     y1 = max(0, iy - pixel_radius)
@@ -95,7 +83,7 @@ uploaded_file = st.file_uploader(
 )
 
 # =====================================================
-#  PROSES FILE
+#  PROSES
 # =====================================================
 
 if uploaded_file:
@@ -112,11 +100,11 @@ if uploaded_file:
         st.markdown("📌 **Koordinat:**")
         st.code(list(ds.coords))
 
-        if "tbb" not in ds:
+        if not all(v in ds for v in ["tbb"]):
             st.error("❌ Variabel 'tbb' tidak ditemukan")
             st.stop()
 
-        if "latitude" not in ds.coords or "longitude" not in ds.coords:
+        if not all(c in ds.coords for c in ["latitude", "longitude"]):
             st.error("❌ Koordinat latitude / longitude tidak ditemukan")
             st.stop()
 
@@ -126,19 +114,16 @@ if uploaded_file:
             )
 
             st.subheader("📊 Hasil Analisis")
-            st.metric(
-                label="Mean TBB (°C)",
-                value=f"{mean_tbb:.2f}"
-            )
+            st.metric("Mean TBB (°C)", f"{mean_tbb:.2f}")
 
-            # Interpretasi cepat
+            # Interpretasi BMKG
             if mean_tbb <= -60:
-                st.error("⚠️ Awan Cumulonimbus sangat tinggi (potensi ekstrem)")
+                st.error("⚠️ Awan Cumulonimbus sangat tinggi (Cuaca Ekstrem)")
             elif mean_tbb <= -50:
                 st.warning("⛈️ Awan konvektif tinggi")
             else:
-                st.info("🌤️ Tidak terindikasi awan konvektif kuat")
+                st.info("🌤️ Tidak terindikasi awan konvektif signifikan")
 
     except Exception as e:
-        st.error("❌ Terjadi kesalahan saat membaca file")
+        st.error("❌ Terjadi kesalahan")
         st.code(str(e))
