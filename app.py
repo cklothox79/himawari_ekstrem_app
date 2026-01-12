@@ -1,5 +1,5 @@
 # =========================================================
-#  HIMAWARI-8 PUTING BELIUNG ANALYSIS – OPERATIONAL VERSION
+#  HIMAWARI-8 PUTING BELIUNG – STABLE STREAMLIT VERSION
 # =========================================================
 
 import os
@@ -22,9 +22,9 @@ st.caption("Rapid Cooling Rate | Composite Index | Operasional BMKG")
 # =========================================================
 c1, c2, c3 = st.columns(3)
 with c1:
-    lat0 = st.number_input("Lintang (°)", value=-7.37, format="%.4f")
+    lat0 = st.number_input("Lintang (°)", value=-7.3700, format="%.4f")
 with c2:
-    lon0 = st.number_input("Bujur (°)", value=112.79, format="%.4f")
+    lon0 = st.number_input("Bujur (°)", value=112.7900, format="%.4f")
 with c3:
     radius_km = st.slider("Radius Analisis (km)", 2, 20, 5)
 
@@ -34,14 +34,14 @@ DATA_DIR = "data_nc"
 # FUNGSI MEAN TBB
 # =========================================================
 def mean_tbb(ds, lat0, lon0, radius_km):
-    tbb = list(ds.data_vars.values())[0].values
+    tbb = ds["tbb"].values
     lat = ds["latitude"].values
     lon = ds["longitude"].values
 
     iy = np.abs(lat - lat0).argmin()
     ix = np.abs(lon - lon0).argmin()
 
-    pix = max(1, int(radius_km / 2.0))  # resolusi IR ~2 km
+    pix = max(1, int(radius_km / 2.0))  # IR ~2 km
 
     sub = tbb[
         max(0, iy - pix):iy + pix + 1,
@@ -51,7 +51,7 @@ def mean_tbb(ds, lat0, lon0, radius_km):
     return float(np.nanmean(sub))
 
 # =========================================================
-# PROSES DATA
+# PROSES DATA MULTI-BAND (SAFE MODE)
 # =========================================================
 bands = ["B07", "B08", "B09", "B10", "B13", "B15"]
 rows = []
@@ -65,23 +65,34 @@ for band in bands:
         if not f.endswith(".nc"):
             continue
 
-        ds = xr.open_dataset(os.path.join(folder, f))
-        tbb_k = mean_tbb(ds, lat0, lon0, radius_km)
+        file_path = os.path.join(folder, f)
 
-        rows.append({
-            "Band": band,
-            "File": f,
-            "TBB_C": tbb_k - 273.15
-        })
+        try:
+            # Paksa engine (INI KUNCI)
+            ds = xr.open_dataset(file_path, engine="netcdf4")
+
+            tbb_c = mean_tbb(ds, lat0, lon0, radius_km) - 273.15
+
+            rows.append({
+                "Band": band,
+                "File": f,
+                "TBB_C": tbb_c
+            })
+
+            ds.close()
+
+        except Exception as e:
+            st.warning(f"Gagal baca: {band}/{f}")
+            continue
 
 df = pd.DataFrame(rows)
 
 if df.empty:
-    st.error("❌ Data tidak terbaca")
+    st.error("❌ Tidak ada data yang berhasil diproses")
     st.stop()
 
 # =========================================================
-# RAPID COOLING RATE (FOKUS IR)
+# RAPID COOLING RATE (IR BAND)
 # =========================================================
 ir_df = df[df["Band"].isin(["B13", "B15"])].copy()
 ir_df["ΔTBB"] = ir_df.groupby("Band")["TBB_C"].diff()
@@ -89,12 +100,10 @@ ir_df["ΔTBB"] = ir_df.groupby("Band")["TBB_C"].diff()
 # =========================================================
 # COMPOSITE INDEX PUTING BELIUNG (CIPI)
 # =========================================================
-cipi = (
-    (-ir_df["ΔTBB"].clip(lower=-15, upper=0) / 15) * 0.5 +
-    (-(ir_df["TBB_C"] + 80).clip(lower=0) / 80) * 0.5
-)
-
-ir_df["CIPI"] = cipi.clip(0, 1)
+ir_df["CIPI"] = (
+    (-ir_df["ΔTBB"].clip(lower=-15, upper=0) / 15) * 0.6 +
+    (-(ir_df["TBB_C"] + 80).clip(lower=0) / 80) * 0.4
+).clip(0, 1)
 
 # =========================================================
 # TAMPILAN DATA
