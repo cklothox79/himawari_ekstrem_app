@@ -1,148 +1,160 @@
-# ==========================================================
-#  APP.PY FINAL – MULTI-BAND HIMAWARI (STREAMLIT CLOUD SAFE)
-# ==========================================================
+# =========================================================
+#  HIMAWARI-8 EXTREME WEATHER ANALYSIS (MULTI-BAND)
+#  Final Stable Version
+# =========================================================
 
-import streamlit as st
+import os
 import numpy as np
 import pandas as pd
 import xarray as xr
+import streamlit as st
 import matplotlib.pyplot as plt
-from pathlib import Path
 
-# ==========================================================
-#  KONFIGURASI
-# ==========================================================
-st.set_page_config(page_title="Himawari Puting Beliung", layout="wide")
-DATA_DIR = Path("data")
-BANDS = ["B07", "B08", "B13", "B15"]
+# =========================================================
+#  KONFIGURASI APP
+# =========================================================
+st.set_page_config(
+    page_title="Analisis Puting Beliung – Himawari-8",
+    layout="wide"
+)
 
-# ==========================================================
-#  FUNGSI UTILITAS
-# ==========================================================
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
-    return 2 * R * np.arcsin(np.sqrt(a))
+st.title("🌪️ Analisis Puting Beliung – Himawari-8 (Multi-Band)")
+st.caption("Berbasis TBB | Radius | Time Series | Operasional BMKG")
 
+# =========================================================
+#  INPUT LOKASI
+# =========================================================
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    lat0 = st.number_input("Lintang (°)", value=-7.3735, format="%.4f")
+
+with col2:
+    lon0 = st.number_input("Bujur (°)", value=112.7938, format="%.4f")
+
+with col3:
+    radius_km = st.slider("Radius Analisis (km)", 2, 20, 5)
+
+DATA_DIR = "data_nc"
+
+# =========================================================
+#  FUNGSI EKSTRAK MEAN TBB (FINAL)
+# =========================================================
 def mean_tbb_radius(ds, lat0, lon0, radius_km):
+    # Ambil variabel TBB
+    if "tbb" in ds:
+        tbb = ds["tbb"].values
+    else:
+        tbb = list(ds.data_vars.values())[0].values
+
     lat = ds["latitude"].values
     lon = ds["longitude"].values
-    tbb = ds["tbb"].values
 
-    lat2d, lon2d = np.meshgrid(lat, lon, indexing="ij")
-    dist = haversine(lat0, lon0, lat2d, lon2d)
-    mask = dist <= radius_km
+    # Cari pixel terdekat
+    iy = np.abs(lat - lat0).argmin()
+    ix = np.abs(lon - lon0).argmin()
 
-    if not np.any(mask):
+    # Resolusi IR Himawari ~2 km
+    res_km = 2.0
+    pix = max(1, int(radius_km / res_km))
+
+    y0 = max(0, iy - pix)
+    y1 = min(tbb.shape[0], iy + pix + 1)
+    x0 = max(0, ix - pix)
+    x1 = min(tbb.shape[1], ix + pix + 1)
+
+    sub = tbb[y0:y1, x0:x1]
+
+    if sub.size < 5:
         return np.nan
 
-    return float(np.nanmean(tbb[mask]))
+    return float(np.nanmean(sub))
 
-def read_nc_safe(nc_file):
-    try:
-        with xr.open_dataset(
-            nc_file,
-            engine="h5netcdf",
-            decode_times=False,
-            chunks={}
-        ) as ds:
-            return ds.load()
-    except Exception as e:
-        st.warning(f"Gagal baca {nc_file.name}")
-        return None
+# =========================================================
+#  PROSES MULTI-BAND
+# =========================================================
+bands = ["B07", "B08", "B09", "B10", "B13", "B15"]
+results = []
 
-# ==========================================================
-#  UI INPUT
-# ==========================================================
-st.title("🌪️ Analisis Puting Beliung – Himawari-8 (Multi-Band)")
+st.subheader("📂 Status Folder Data")
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    lat0 = st.number_input("Lintang (°)", value=-7.37, format="%.4f")
-with col2:
-    lon0 = st.number_input("Bujur (°)", value=112.79, format="%.4f")
-with col3:
-    radius = st.slider("Radius Analisis (km)", 2, 10, 3)
+for band in bands:
+    folder = os.path.join(DATA_DIR, band)
 
-st.markdown("---")
-
-# ==========================================================
-#  PROSES DATA
-# ==========================================================
-results = {}
-
-for band in BANDS:
-    band_dir = DATA_DIR / band
-    if not band_dir.exists():
+    if not os.path.exists(folder):
+        st.error(f"{band} ❌ folder tidak ditemukan")
         continue
 
-    values = []
-    times = []
+    files = sorted([f for f in os.listdir(folder) if f.endswith(".nc")])
 
-    nc_files = sorted(band_dir.glob("*.nc"))[:8]  # HARD LIMIT CLOUD
+    if len(files) == 0:
+        st.warning(f"{band} ❌ tidak ada file")
+        continue
 
-    for nc in nc_files:
-        ds = read_nc_safe(nc)
-        if ds is None:
-            continue
+    st.success(f"{band} ✅ {len(files)} file ditemukan")
 
-        mean_val = mean_tbb_radius(ds, lat0, lon0, radius)
-        if not np.isnan(mean_val):
-            values.append(mean_val - 273.15)  # K → °C
-            times.append(nc.stem[-4:])
+    for f in files:
+        path = os.path.join(folder, f)
+        try:
+            ds = xr.open_dataset(path)
+            mean_tbb = mean_tbb_radius(ds, lat0, lon0, radius_km)
 
-    if values:
-        results[band] = pd.DataFrame({
-            "time": times,
-            "mean_tbb": values
-        })
+            results.append({
+                "Band": band,
+                "File": f,
+                "Mean_TBB_K": mean_tbb
+            })
 
-# ==========================================================
-#  TAMPILKAN HASIL
-# ==========================================================
-if not results:
+        except Exception as e:
+            st.warning(f"{band} | {f} ❌ {e}")
+
+# =========================================================
+#  HASIL
+# =========================================================
+st.divider()
+st.subheader("📊 Hasil Analisis Multi-Band")
+
+df = pd.DataFrame(results)
+
+if len(df) == 0:
     st.error("❌ Tidak ada data yang berhasil diproses")
     st.stop()
 
-st.subheader("📊 Time Series Mean TBB")
+df["Mean_TBB_C"] = df["Mean_TBB_K"] - 273.15
+st.dataframe(df, use_container_width=True)
 
-fig, ax = plt.subplots()
-for band, df in results.items():
-    ax.plot(df["time"], df["mean_tbb"], marker="o", label=band)
+# =========================================================
+#  GRAFIK TIME SERIES PER BAND
+# =========================================================
+st.subheader("📈 Time Series Mean TBB")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+for band in bands:
+    sub = df[df["Band"] == band]
+    if len(sub) > 0:
+        ax.plot(sub.index, sub["Mean_TBB_C"], marker="o", label=band)
 
 ax.set_ylabel("Mean TBB (°C)")
-ax.set_xlabel("Waktu (UTC)")
+ax.set_xlabel("Index Waktu (10-menitan)")
 ax.legend()
 ax.grid(True)
+
 st.pyplot(fig)
 
-# ==========================================================
-#  ANALISIS PUTING BELIUNG
-# ==========================================================
-st.subheader("🧠 Analisis Otomatis")
+# =========================================================
+#  INTERPRETASI OTOMATIS SEDERHANA
+# =========================================================
+st.subheader("📝 Interpretasi Otomatis")
 
-msg = []
+cooling = df.groupby("Band")["Mean_TBB_C"].agg(["max", "min"])
+cooling["ΔTBB"] = cooling["max"] - cooling["min"]
 
-if "B13" in results:
-    tbb13 = results["B13"]["mean_tbb"].values
-    if len(tbb13) >= 2:
-        cooling = tbb13[-1] - tbb13[0]
-        if cooling <= -6:
-            msg.append("❄️ Rapid cooling signifikan pada B13")
+st.dataframe(cooling)
 
-if "B07" in results and "B13" in results:
-    diff = results["B07"]["mean_tbb"].values - results["B13"]["mean_tbb"].values
-    if np.nanmean(diff) <= -5:
-        msg.append("💨 Indikasi dry intrusion (B07-B13)")
-
-if msg:
-    st.error("⚠️ **INDIKASI KUAT PUTING BELIUNG**")
-    for m in msg:
-        st.write("•", m)
+if (cooling["ΔTBB"] > 8).any():
+    st.success("🌪️ Indikasi kuat awan konvektif intens / puting beliung")
 else:
-    st.info("🌧️ Dominan konveksi hujan, indikasi vorteks lemah")
+    st.info("🌧️ Konveksi terdeteksi, namun tanpa pendinginan ekstrem")
 
-st.caption("Analisis berbasis TBB Himawari-8 | Streamlit Cloud Safe")
+st.caption("Analisis berbasis Himawari-8 | BMKG-style | Tahap Operasional")
