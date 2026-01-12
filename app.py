@@ -1,7 +1,6 @@
 # ============================================================
-#  HIMAWARI-8 MULTI BAND EXTREME WEATHER ANALYSIS
-#  Puting Beliung Detection – BMKG Style
-#  Author: Ferri Kusuma + ChatGPT
+# HIMAWARI-8 MULTI BAND EXTREME WEATHER ANALYSIS
+# PUTING BELIUNG – STABLE VERSION (ANTI CRASH)
 # ============================================================
 
 import streamlit as st
@@ -13,63 +12,56 @@ from pathlib import Path
 from datetime import datetime
 
 # ============================================================
-# KONFIGURASI
-# ============================================================
 DATA_DIR = Path("data_nc")
 BANDS = ["B07", "B08", "B09", "B10", "B13", "B15"]
+KM_PER_PIXEL = 2.0
 
-st.set_page_config(
-    page_title="Analisis Puting Beliung – Himawari-8",
-    layout="wide"
-)
+st.set_page_config(page_title="Analisis Puting Beliung – Himawari", layout="wide")
 
 # ============================================================
-# FUNGSI DASAR
-# ============================================================
-def load_band_timeseries(band):
+def find_nearest_index(array, value):
+    return int(np.abs(array - value).argmin())
+
+def mean_radius_tbb_safe(tbb, lat, lon, lat0, lon0, radius_km):
+    iy = find_nearest_index(lat, lat0)
+    ix = find_nearest_index(lon, lon0)
+
+    r_pix = int(radius_km / KM_PER_PIXEL)
+
+    y0 = max(0, iy - r_pix)
+    y1 = min(len(lat), iy + r_pix)
+    x0 = max(0, ix - r_pix)
+    x1 = min(len(lon), ix + r_pix)
+
+    window = tbb.values[y0:y1, x0:x1]
+    return float(np.nanmean(window))
+
+def load_band(band):
     files = sorted((DATA_DIR / band).glob("*.nc"))
     data = []
     times = []
 
     for f in files:
-        try:
-            ds = xr.open_dataset(f)
-            tbb = ds["tbb"]
-            lat = ds["latitude"].values
-            lon = ds["longitude"].values
+        ds = xr.open_dataset(f)
+        tbb = ds["tbb"]
+        lat = ds["latitude"].values
+        lon = ds["longitude"].values
 
-            time_str = f.stem.split("_")[-1]
-            time = datetime.strptime(time_str, "%Y%m%d%H%M")
+        time_str = f.stem.split("_")[-1]
+        time = datetime.strptime(time_str, "%Y%m%d%H%M")
 
-            data.append((tbb, lat, lon))
-            times.append(time)
-        except:
-            continue
+        data.append((tbb, lat, lon))
+        times.append(time)
 
     return data, times
 
-
-def mean_radius_tbb(tbb, lat, lon, lat0, lon0, radius_km):
-    lat2d, lon2d = np.meshgrid(lat, lon, indexing="ij")
-    dist_km = np.sqrt(
-        (lat2d - lat0)**2 + (lon2d - lon0)**2
-    ) * 111.0
-
-    mask = dist_km <= radius_km
-    return float(np.nanmean(tbb.values[mask]))
-
-
 # ============================================================
-# SIDEBAR INPUT
+# SIDEBAR
 # ============================================================
-st.sidebar.title("📍 Lokasi & Parameter")
-
+st.sidebar.title("📍 Lokasi Analisis")
 lat0 = st.sidebar.number_input("Lintang (°)", value=-7.3735, format="%.4f")
 lon0 = st.sidebar.number_input("Bujur (°)", value=112.7938, format="%.4f")
-radius_km = st.sidebar.slider("Radius Analisis (km)", 2, 20, 5)
-
-st.sidebar.markdown("---")
-st.sidebar.info("Data diambil otomatis dari folder data_nc")
+radius_km = st.sidebar.slider("Radius (km)", 2, 20, 5)
 
 # ============================================================
 # LOAD DATA
@@ -78,43 +70,33 @@ band_data = {}
 band_times = {}
 
 for band in BANDS:
-    data, times = load_band_timeseries(band)
-    if len(data) == 0:
-        st.error(f"Tidak ada data valid untuk {band}")
-        st.stop()
+    data, times = load_band(band)
     band_data[band] = data
     band_times[band] = times
 
-# gunakan waktu dari B13 sebagai referensi
 times = band_times["B13"]
 
 # ============================================================
-# HITUNG TIME SERIES
+# TIME SERIES
 # ============================================================
-rows = []
+records = []
 
 for i, t in enumerate(times):
+    row = {"Time": t}
     try:
-        values = {}
         for band in BANDS:
             tbb, lat, lon = band_data[band][i]
-            values[band] = mean_radius_tbb(
+            row[band] = mean_radius_tbb_safe(
                 tbb, lat, lon, lat0, lon0, radius_km
             )
-
-        row = {
-            "Time": t,
-            **values
-        }
-        rows.append(row)
+        records.append(row)
     except:
         continue
 
-df = pd.DataFrame(rows)
-df.set_index("Time", inplace=True)
+df = pd.DataFrame(records).set_index("Time")
 
 # ============================================================
-# HITUNG INDEKS
+# INDEKS
 # ============================================================
 df["Updraft_Index"] = df["B07"] - df["B13"]
 df["Rapid_Cooling"] = df["B13"].diff()
@@ -122,14 +104,12 @@ df["Dry_Intrusion"] = df["B10"].diff()
 df["Turbulence"] = abs(df["B13"] - df["B15"])
 
 # ============================================================
-# LOGIKA PUTING BELIUNG
+# KLASIFIKASI
 # ============================================================
-def classify(row):
-    if row["Updraft_Index"] <= -5 and (
-        row["Rapid_Cooling"] <= -3 or row["Dry_Intrusion"] >= 1.5
-    ):
+def classify(r):
+    if r["Updraft_Index"] <= -5 and (r["Rapid_Cooling"] <= -3 or r["Dry_Intrusion"] >= 1.5):
         return "🌪️ POTENSI PUTING BELIUNG"
-    elif row["Updraft_Index"] <= -5:
+    elif r["Updraft_Index"] <= -5:
         return "⛈️ KONVEKSI KUAT LOKAL"
     else:
         return "🌤️ KONVEKSI BIASA"
@@ -137,43 +117,17 @@ def classify(row):
 df["Kesimpulan"] = df.apply(classify, axis=1)
 
 # ============================================================
-# TAMPILAN UTAMA
+# OUTPUT
 # ============================================================
-st.title("🌪️ Analisis Puting Beliung – Himawari-8 (Multi Band)")
-st.caption("Berbasis TBB, Updraft, Rapid Cooling, Dry Intrusion")
-
-st.subheader("📊 Tabel Time Series")
+st.title("🌪️ Analisis Puting Beliung – Himawari-8")
 st.dataframe(df.round(2), use_container_width=True)
-
-# ============================================================
-# GRAFIK
-# ============================================================
-st.subheader("📈 Grafik Indeks Utama")
 
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(df.index, df["Updraft_Index"], label="Updraft Index")
 ax.plot(df.index, df["Rapid_Cooling"], label="Rapid Cooling")
 ax.plot(df.index, df["Dry_Intrusion"], label="Dry Intrusion")
-ax.axhline(-5, linestyle="--", alpha=0.5)
 ax.legend()
-ax.set_ylabel("Nilai Indeks")
 ax.grid(True)
-
 st.pyplot(fig)
 
-# ============================================================
-# KESIMPULAN OTOMATIS
-# ============================================================
-st.subheader("📝 Kesimpulan Otomatis")
-
-final_status = df["Kesimpulan"].value_counts().idxmax()
-st.success(final_status)
-
-st.markdown(
-    """
-**Catatan:**
-- Sistem ini menggabungkan *updraft awal*, *pendinginan puncak awan*,
-  dan *intrusi udara kering*.
-- Cocok untuk kejadian puting beliung tropis skala lokal.
-"""
-)
+st.success(df["Kesimpulan"].value_counts().idxmax())
