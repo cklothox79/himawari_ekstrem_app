@@ -1,8 +1,8 @@
 streamlit
-xarray
 numpy
 pandas
 matplotlib
+xarray
 netCDF4
-reportlab
-python-docx
+h5netcdf
+scipy
