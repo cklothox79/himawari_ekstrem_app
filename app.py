@@ -1,143 +1,148 @@
-# ============================================================
-# HIMAWARI-8 PUTING BELIUNG – DEBUG STABLE VERSION
-# ============================================================
+# ==========================================================
+#  APP.PY FINAL – MULTI-BAND HIMAWARI (STREAMLIT CLOUD SAFE)
+# ==========================================================
 
 import streamlit as st
-import xarray as xr
 import numpy as np
 import pandas as pd
+import xarray as xr
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import datetime
 
+# ==========================================================
+#  KONFIGURASI
+# ==========================================================
 st.set_page_config(page_title="Himawari Puting Beliung", layout="wide")
+DATA_DIR = Path("data")
+BANDS = ["B07", "B08", "B13", "B15"]
 
-DATA_DIR = Path("data_nc")
-BANDS = ["B07", "B08", "B09", "B10", "B13", "B15"]
-KM_PER_PIXEL = 2.0
+# ==========================================================
+#  FUNGSI UTILITAS
+# ==========================================================
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
 
-# ============================================================
-def find_nearest_index(arr, val):
-    return int(np.abs(arr - val).argmin())
+def mean_tbb_radius(ds, lat0, lon0, radius_km):
+    lat = ds["latitude"].values
+    lon = ds["longitude"].values
+    tbb = ds["tbb"].values
 
-def mean_radius_safe(tbb, lat, lon, lat0, lon0, radius_km):
-    iy = find_nearest_index(lat, lat0)
-    ix = find_nearest_index(lon, lon0)
-    r = int(radius_km / KM_PER_PIXEL)
+    lat2d, lon2d = np.meshgrid(lat, lon, indexing="ij")
+    dist = haversine(lat0, lon0, lat2d, lon2d)
+    mask = dist <= radius_km
 
-    y0, y1 = max(0, iy-r), min(len(lat), iy+r)
-    x0, x1 = max(0, ix-r), min(len(lon), ix+r)
+    if not np.any(mask):
+        return np.nan
 
-    return float(np.nanmean(tbb.values[y0:y1, x0:x1]))
+    return float(np.nanmean(tbb[mask]))
 
-def load_band(band):
-    folder = DATA_DIR / band
-    files = sorted(folder.glob("*.nc"))
-    data = []
+def read_nc_safe(nc_file):
+    try:
+        with xr.open_dataset(
+            nc_file,
+            engine="h5netcdf",
+            decode_times=False,
+            chunks={}
+        ) as ds:
+            return ds.load()
+    except Exception as e:
+        st.warning(f"Gagal baca {nc_file.name}")
+        return None
 
-    for f in files:
-        try:
-            ds = xr.open_dataset(f)
-            data.append({
-                "time": datetime.strptime(f.stem.split("_")[-1], "%Y%m%d%H%M"),
-                "tbb": ds["tbb"],
-                "lat": ds["latitude"].values,
-                "lon": ds["longitude"].values
-            })
-        except Exception as e:
-            st.warning(f"Gagal baca {f.name}: {e}")
+# ==========================================================
+#  UI INPUT
+# ==========================================================
+st.title("🌪️ Analisis Puting Beliung – Himawari-8 (Multi-Band)")
 
-    return data
+col1, col2, col3 = st.columns(3)
+with col1:
+    lat0 = st.number_input("Lintang (°)", value=-7.37, format="%.4f")
+with col2:
+    lon0 = st.number_input("Bujur (°)", value=112.79, format="%.4f")
+with col3:
+    radius = st.slider("Radius Analisis (km)", 2, 10, 3)
 
-# ============================================================
-st.sidebar.header("📍 Lokasi")
-lat0 = st.sidebar.number_input("Lintang", value=-7.3735)
-lon0 = st.sidebar.number_input("Bujur", value=112.7938)
-radius_km = st.sidebar.slider("Radius (km)", 2, 20, 5)
+st.markdown("---")
 
-# ============================================================
-# LOAD SEMUA BAND
-# ============================================================
-band_data = {}
-lengths = {}
-
-st.subheader("🧪 Cek Jumlah File per Band")
+# ==========================================================
+#  PROSES DATA
+# ==========================================================
+results = {}
 
 for band in BANDS:
-    data = load_band(band)
-    band_data[band] = data
-    lengths[band] = len(data)
-    st.write(f"{band}: {len(data)} file")
+    band_dir = DATA_DIR / band
+    if not band_dir.exists():
+        continue
 
-min_len = min(lengths.values())
+    values = []
+    times = []
 
-if min_len == 0:
-    st.error("❌ Ada band tanpa data. Periksa folder data_nc.")
+    nc_files = sorted(band_dir.glob("*.nc"))[:8]  # HARD LIMIT CLOUD
+
+    for nc in nc_files:
+        ds = read_nc_safe(nc)
+        if ds is None:
+            continue
+
+        mean_val = mean_tbb_radius(ds, lat0, lon0, radius)
+        if not np.isnan(mean_val):
+            values.append(mean_val - 273.15)  # K → °C
+            times.append(nc.stem[-4:])
+
+    if values:
+        results[band] = pd.DataFrame({
+            "time": times,
+            "mean_tbb": values
+        })
+
+# ==========================================================
+#  TAMPILKAN HASIL
+# ==========================================================
+if not results:
+    st.error("❌ Tidak ada data yang berhasil diproses")
     st.stop()
 
-st.info(f"Sinkronisasi ke {min_len} timestep")
+st.subheader("📊 Time Series Mean TBB")
 
-# ============================================================
-# HITUNG TIME SERIES
-# ============================================================
-records = []
+fig, ax = plt.subplots()
+for band, df in results.items():
+    ax.plot(df["time"], df["mean_tbb"], marker="o", label=band)
 
-for i in range(min_len):
-    row = {"Time": band_data["B13"][i]["time"]}
-    try:
-        for band in BANDS:
-            d = band_data[band][i]
-            row[band] = mean_radius_safe(
-                d["tbb"], d["lat"], d["lon"], lat0, lon0, radius_km
-            )
-        records.append(row)
-    except Exception as e:
-        st.warning(f"Gagal timestep {i}: {e}")
+ax.set_ylabel("Mean TBB (°C)")
+ax.set_xlabel("Waktu (UTC)")
+ax.legend()
+ax.grid(True)
+st.pyplot(fig)
 
-df = pd.DataFrame(records)
+# ==========================================================
+#  ANALISIS PUTING BELIUNG
+# ==========================================================
+st.subheader("🧠 Analisis Otomatis")
 
-if df.empty:
-    st.error("❌ DataFrame kosong. Tidak ada data valid.")
-    st.stop()
+msg = []
 
-df.set_index("Time", inplace=True)
+if "B13" in results:
+    tbb13 = results["B13"]["mean_tbb"].values
+    if len(tbb13) >= 2:
+        cooling = tbb13[-1] - tbb13[0]
+        if cooling <= -6:
+            msg.append("❄️ Rapid cooling signifikan pada B13")
 
-# ============================================================
-# INDEKS
-# ============================================================
-df["Updraft"] = df["B07"] - df["B13"]
-df["RapidCooling"] = df["B13"].diff()
-df["DryIntrusion"] = df["B10"].diff()
-df["Turbulence"] = abs(df["B13"] - df["B15"])
+if "B07" in results and "B13" in results:
+    diff = results["B07"]["mean_tbb"].values - results["B13"]["mean_tbb"].values
+    if np.nanmean(diff) <= -5:
+        msg.append("💨 Indikasi dry intrusion (B07-B13)")
 
-# ============================================================
-# KESIMPULAN
-# ============================================================
-def classify(r):
-    if r["Updraft"] <= -5 and (r["RapidCooling"] <= -3 or r["DryIntrusion"] >= 1.5):
-        return "🌪️ POTENSI PUTING BELIUNG"
-    elif r["Updraft"] <= -5:
-        return "⛈️ KONVEKSI KUAT"
-    else:
-        return "🌤️ KONVEKSI BIASA"
+if msg:
+    st.error("⚠️ **INDIKASI KUAT PUTING BELIUNG**")
+    for m in msg:
+        st.write("•", m)
+else:
+    st.info("🌧️ Dominan konveksi hujan, indikasi vorteks lemah")
 
-df["Status"] = df.apply(classify, axis=1)
-
-# ============================================================
-# OUTPUT
-# ============================================================
-st.subheader("📊 Tabel Analisis")
-st.dataframe(df.round(2), use_container_width=True)
-
-st.subheader("📈 Grafik Indeks")
-try:
-    fig, ax = plt.subplots()
-    ax.plot(df.index, df["Updraft"], label="Updraft")
-    ax.plot(df.index, df["RapidCooling"], label="Rapid Cooling")
-    ax.plot(df.index, df["DryIntrusion"], label="Dry Intrusion")
-    ax.legend()
-    st.pyplot(fig)
-except Exception as e:
-    st.warning(f"Gagal plot grafik: {e}")
-
-st.success(df["Status"].value_counts().idxmax())
+st.caption("Analisis berbasis TBB Himawari-8 | Streamlit Cloud Safe")
